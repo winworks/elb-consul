@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -eu
+
+if [ $# -ne 2 ]; then
+  echo "Usage: ${0##*/} <service> <target_group>" >&2
+  exit 1
+fi
+
+service=$1
+target_group=$2
+
+cd "$(dirname $0)/../elb-consul"
+exec consul-wait consul watch -type service -service $service ./listener $target_group

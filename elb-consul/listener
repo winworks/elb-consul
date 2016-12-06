@@ -1,0 +1,107 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'json'
+require 'logger'
+require 'open-uri'
+require 'socket'
+require 'timeout'
+require 'bundler/setup'
+require 'aws-sdk-core'
+
+class ELBConsulListener
+  def initialize(target_group_name, consul_service_json, logger)
+    @target_group_name   = target_group_name
+    @consul_service_json = consul_service_json
+    @logger              = logger
+  end
+
+  def run
+    register
+    deregister
+  end
+
+  private
+
+  def register
+    return if registering_targets.empty?
+    options = { target_group_arn: target_group_arn, targets: registering_targets }
+    @logger.info("elbv2.register_targets(#{options.inspect})")
+    elbv2.register_targets(options)
+  end
+
+  def deregister
+    return if deregistering_targets.empty?
+    options = { target_group_arn: target_group_arn, targets: deregistering_targets }
+    @logger.info("elbv2.deregister_targets(#{options.inspect})")
+    elbv2.deregister_targets(options)
+  end
+
+  def registering_targets
+    @_registering_targets ||= consul_targets - elb_targets
+  end
+
+  def deregistering_targets
+    @_deregistering_targets ||= elb_targets - consul_targets
+  end
+
+  def elb_targets
+    @_elb_targets ||= elbv2
+      .describe_target_health(target_group_arn: target_group_arn)
+      .target_health_descriptions
+      .reject { |desc| desc.target_health.state == 'draining' }
+      .map(&:target)
+      .select { |target| target.id == instance_id }
+      .map { |target| { id: target.id, port: target.port } }
+      .tap { |targets| @logger.info("elb: #{targets.inspect}") }
+  end
+
+  def consul_targets
+    @_consul_targets ||= JSON.parse(@consul_service_json)
+      .select { |service| service.dig('Node', 'Node') == hostname }
+      .select { |service| service['Checks'].all? { |c| c['Status'] == 'passing' } }
+      .map { |service| { id: instance_id, port: service.dig('Service', 'Port') } }
+      .tap { |targets| @logger.info("consul: #{targets.inspect}") }
+  end
+
+  def target_group_arn
+    @_target_group_arn ||= elbv2
+      .describe_target_groups(names: [@target_group_name])
+      .target_groups.first.target_group_arn
+  end
+
+  def hostname
+    @_hostname ||= Socket.gethostname
+  end
+
+  def elbv2
+    @_elbv2 ||= Aws::ElasticLoadBalancingV2::Client.new(region: region)
+  end
+
+  def instance_id
+    @_instance_id ||= open(
+      'http://169.254.169.254/latest/meta-data/instance-id',
+      &:read)
+  end
+
+  def region
+    @_region ||= open(
+      'http://169.254.169.254/latest/meta-data/placement/availability-zone',
+      &:read).chop
+  end
+end
+
+def lock
+  File.open('/tmp/elb-consul.lock', 'w') do |file|
+    Timeout.timeout(60) { file.flock(File::LOCK_EX) }
+    yield
+  end
+end
+
+unless ARGV.length == 1
+  warn "Usage: #{File.basename($0)} <target_group>"
+  exit 1
+end
+
+listener = ELBConsulListener.new(ARGV.first, $stdin.read, Logger.new($stdout))
+lock { listener.run }

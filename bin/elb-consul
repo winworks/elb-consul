@@ -11,4 +11,6 @@ service=$1
 target_group=$2
 
 cd "$(dirname $0)/../elb-consul"
-exec consul-wait consul watch -type service -service $service ./listener $target_group
+exec consul-wait \
+  consul watch -type service -service $service -passingonly true \
+  ./listener $target_group

@@ -59,7 +59,6 @@ class ELBConsulListener
   def consul_targets
     @_consul_targets ||= JSON.parse(@consul_service_json)
       .select { |service| service.dig('Node', 'Node') == hostname }
-      .select { |service| service['Checks'].all? { |c| c['Status'] == 'passing' } }
       .map { |service| { id: instance_id, port: service.dig('Service', 'Port') } }
       .tap { |targets| @logger.info("consul: #{targets.inspect}") }
   end
